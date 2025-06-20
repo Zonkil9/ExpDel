@@ -8,12 +8,14 @@ fn main() {
     println!("Please enter the path");
     let mut input = String::new();
     io::stdin().read_line(&mut input).expect("Failed to read line");
-    
-    list_by_date(input);
+
+    let path = path::Path::new(input.trim());
+
+    list_by_date(path)
+        .unwrap_or_else(|err| eprintln!("Error: {}", err));
 }
 
-fn list_by_date(input: String) -> io::Result<()> {
-    let path = path::PathBuf::from(input.trim());
+fn list_by_date(path: &path::Path) -> io::Result<()> {
     println!("Opening {}", path.display());
 
     let mut entries: Vec<path::PathBuf> = fs::read_dir(&path)?
