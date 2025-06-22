@@ -10,7 +10,7 @@ enum SortType {
     MTime,
     CTime,
     ATime,
-}
+} 
 
 fn main() {
     println!("Please enter the path");
