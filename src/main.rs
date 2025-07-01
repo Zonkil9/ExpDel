@@ -1,9 +1,9 @@
 use chrono;
-use std::cmp;
 use std::fs;
 use std::io;
 use std::path;
 use std::time;
+use std::collections;
 
 #[derive(Debug)]
 enum SortType {
@@ -37,37 +37,7 @@ fn main() {
 
     let path = path::Path::new(input.trim());
 
-    list_by_date(path, sort_type).unwrap_or_else(|err| eprintln!("Error: {}", err));
-}
-
-fn list_by_date(path: &path::Path, sort_type: SortType) -> io::Result<()> {
-    println!("Opening {} and sorting by {:?}", path.display(), sort_type);
-
-    let mut entries: Vec<path::PathBuf> = fs::read_dir(&path)?
-        .filter_map(|res| res.ok().map(|e| e.path()))
-        .filter(|p| fs::metadata(p).is_ok())
-        .collect();
-
-    entries.sort_by_key(|k| {
-        cmp::Reverse(
-            fs::metadata(k)
-                .map(|m| get_time_type(&m, &sort_type))
-                .unwrap_or(time::UNIX_EPOCH),
-        )
-    });
-
-    for entry in entries {
-        let metadata = fs::metadata(&entry).expect("Failed to get metadata for entry");
-        let time = get_time_type(&metadata, &sort_type);
-        let datetime: chrono::DateTime<chrono::Local> = time.into();
-        println!(
-            "Name: {} | Date: {}",
-            entry.display(),
-            datetime.format("%Y-%m-%d %H:%M:%S")
-        );
-    }
-
-    Ok(())
+    exp_sort(path, sort_type).unwrap_or_else(|err| eprintln!("Error: {}", err));
 }
 
 fn get_time_type(meta: &fs::Metadata, sort_type: &SortType) -> time::SystemTime {
@@ -76,4 +46,43 @@ fn get_time_type(meta: &fs::Metadata, sort_type: &SortType) -> time::SystemTime 
         SortType::ATime => meta.accessed().unwrap_or(time::UNIX_EPOCH),
         SortType::CTime => meta.created().unwrap_or(time::UNIX_EPOCH),
     }
+}
+
+fn exp_sort(path: &path::Path, sort_type: SortType) -> io::Result<()> {
+    println!("Opening {} and sorting by {:?}", path.display(), sort_type);
+
+    let now = time::SystemTime::now();
+    let mut groups: collections::BTreeMap<u64, Vec<path::PathBuf>> = collections::BTreeMap::new();
+    let mut max_days = 1;
+
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        let file_time = get_time_type(&meta, &sort_type);
+        let age = now.duration_since(file_time).unwrap_or(time::Duration::ZERO);
+        let days = age.as_secs() / 86400;
+
+        let mut bucket = 1;
+        while bucket <= days {
+            bucket *= 2;
+        }
+        max_days = max_days.max(bucket);
+        groups.entry(bucket).or_default().push(entry.path());
+    }
+
+    let mut bucket = 1;
+    while bucket <= max_days {
+        if let Some(files) = groups.get(&bucket) {
+            println!("\nYounger than {} days", bucket);
+            for file in files {
+                let meta = fs::metadata(file)?;
+                let time = get_time_type(&meta, &sort_type);
+                let datetime: chrono::DateTime<chrono::Local> = time.into();
+                println!("{} | {}", file.display(), datetime.format("%Y-%m-%d %H:%M:%S"));
+            }
+        }
+        bucket *= 2;
+    }
+
+    Ok(())
 }
