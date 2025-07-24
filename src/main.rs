@@ -57,13 +57,10 @@ fn get_time_type(meta: &fs::Metadata, sort_type: &SortType) -> time::SystemTime 
     }
 }
 
-fn exp_sort_and_list_to_del(
+fn group_files_by_bucket(
     path: &path::Path,
     sort_type: &SortType,
-    files_to_keep: u32,
-) -> io::Result<()> {
-    println!("\nOpening {} and sorting by {:?}", path.display(), sort_type);
-
+) -> io::Result<collections::BTreeMap<u64, Vec<(path::PathBuf, time::SystemTime)>>> {
     let now = time::SystemTime::now();
     let mut groups: collections::BTreeMap<u64, Vec<(path::PathBuf, time::SystemTime)>> = collections::BTreeMap::new();
 
@@ -81,6 +78,17 @@ fn exp_sort_and_list_to_del(
             groups.entry(bucket).or_default().push((entry.path(), file_time));
         }
     }
+    Ok(groups)
+}
+
+fn exp_sort_and_list_to_del(
+    path: &path::Path,
+    sort_type: &SortType,
+    files_to_keep: u32,
+) -> io::Result<()> {
+    println!("\nOpening {} and sorting by {:?}", path.display(), sort_type);
+
+    let groups = group_files_by_bucket(path, sort_type)?;
 
     for (bucket, files) in groups.iter() {
         println!("\nYounger than {} days:", bucket);
