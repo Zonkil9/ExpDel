@@ -4,6 +4,7 @@ use std::io;
 use std::path;
 use std::time;
 use std::collections;
+use itertools::Itertools;
 
 #[derive(Debug)]
 enum SortType {
@@ -65,7 +66,6 @@ fn exp_sort_and_list_to_del(
 
     let now = time::SystemTime::now();
     let mut groups: collections::BTreeMap<u64, Vec<(path::PathBuf, time::SystemTime)>> = collections::BTreeMap::new();
-    let mut max_days = 1;
 
     for entry in fs::read_dir(path)? {
         let entry = entry?;
@@ -73,36 +73,29 @@ fn exp_sort_and_list_to_del(
         let file_time = get_time_type(&meta, &sort_type);
         if let Ok(age) = now.duration_since(file_time) {
             let days = age.as_secs() / 86400;
-            let mut bucket = 1;
-            while bucket <= days {
-                bucket *= 2;
-            }
-            max_days = max_days.max(bucket);
+            let bucket = if days == 0 {
+                1
+            } else {
+                1 << (days.checked_ilog2().unwrap() + if days.is_power_of_two() { 0 } else { 1 })
+            };
             groups.entry(bucket).or_default().push((entry.path(), file_time));
         }
     }
 
-    let mut bucket = 1;
-    while bucket <= max_days {
-        if let Some(files) = groups.get(&bucket) {
-            println!("\nYounger than {} days:", bucket);
-            let mut files_sorted = files.clone();
-            files_sorted.sort_by_key(|(_, t)| *t);
-            for (i, (file, time)) in files_sorted.iter().enumerate() {
-                let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-                println!(
-                    "{} | {}{}",
-                    file.display(),
-                    datetime.format("%Y-%m-%d %H:%M:%S"),
-                    if (i as u32) >= files_to_keep {
-                        " <-- to be deleted"
-                    } else {
-                        ""
-                    }
-                );
-            }
+    for (bucket, files) in groups.iter() {
+        println!("\nYounger than {} days:", bucket);
+        let sorted: Vec<_> = files.iter().sorted_by_key(|(_, t)| *t).collect();
+        let split_idx = files_to_keep.min(sorted.len() as u32) as usize; // Ensure the code doesn't panic
+        let (keep, delete) = sorted.split_at(split_idx); // Split the sorted files into two groups
+
+        for (file, time) in keep {
+            let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+            println!("{} | {}", file.display(), datetime.format("%Y-%m-%d %H:%M:%S"));
         }
-        bucket *= 2;
+        for (file, time) in delete {
+            let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+            println!("{} | {} <-- to be deleted", file.display(), datetime.format("%Y-%m-%d %H:%M:%S"));
+        }
     }
 
     Ok(())
