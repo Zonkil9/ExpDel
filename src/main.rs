@@ -45,8 +45,10 @@ fn main() {
 
     let path = path::Path::new(input.trim());
 
-    exp_sort_and_list_to_del(&path, &sort_type, files_to_keep)
-        .unwrap_or_else(|err| eprintln!("Error: {}", err));
+    exp_sort_and_list_to_del(&path, &sort_type, files_to_keep).unwrap_or_else(|err| {
+        eprintln!("Error: {}", err);
+        (Vec::new(), Vec::new())
+    });
 }
 
 fn get_time_type(meta: &fs::Metadata, sort_type: &SortType) -> time::SystemTime {
@@ -99,7 +101,10 @@ fn group_files_by_bucket(
         }
     }
     if groups.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "No files found in the directory. Remember that the program only works with files, not directories."));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No files found in the directory. Remember that the program only works with files, not directories.",
+        ));
     }
     Ok(groups)
 }
@@ -108,7 +113,7 @@ fn exp_sort_and_list_to_del(
     path: &path::Path,
     sort_type: &SortType,
     files_to_keep: u32,
-) -> io::Result<()> {
+) -> io::Result<(Vec<path::PathBuf>, Vec<path::PathBuf>)> {
     println!(
         "\nOpening {}, sorting by {:?} and keeping {} files",
         path.display(),
@@ -117,6 +122,8 @@ fn exp_sort_and_list_to_del(
     );
 
     let groups = group_files_by_bucket(path, sort_type)?;
+    let mut to_keep = Vec::new();
+    let mut to_delete = Vec::new();
 
     if files_to_keep == 0 && !cfg!(test) {
         println!("No files will be kept, you want ALL files to be deleted.");
@@ -127,7 +134,7 @@ fn exp_sort_and_list_to_del(
             .expect("Failed to read line");
         if confirmation.trim().to_lowercase() != "yes" {
             println!("Operation cancelled.");
-            return Ok(());
+            return Ok((Vec::new(), Vec::new()));
         }
     } else if files_to_keep == 0 && cfg!(test) {
         println!("(Test mode) Skipping confirmation.");
@@ -154,6 +161,7 @@ fn exp_sort_and_list_to_del(
                 file.display(),
                 datetime.format("%Y-%m-%d %H:%M:%S")
             );
+            to_keep.push(file.clone());
         }
         for (file, time) in delete {
             let datetime: chrono::DateTime<chrono::Local> = (*time).into();
@@ -162,18 +170,20 @@ fn exp_sort_and_list_to_del(
                 file.display(),
                 datetime.format("%Y-%m-%d %H:%M:%S")
             );
+            to_delete.push(file.clone());
         }
     }
 
-    Ok(())
+    Ok((to_keep, to_delete))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filetime::{set_file_times, FileTime};
+    use filetime::{FileTime, set_file_times};
     use rand::Rng;
     use std::io::Write;
+    use std::thread;
     use tempfile::tempdir;
 
     #[test]
@@ -210,7 +220,7 @@ mod tests {
             );
 
             set_file_times(&file_path, random_time, random_time).unwrap();
-        } // Create some files with different times, max one year old
+        } // Create some files with different times, max one-year-old
 
         let result = exp_sort_and_list_to_del(dir.path(), &SortType::MTime, rng.random_range(1..5));
         assert!(result.is_ok());
@@ -218,6 +228,191 @@ mod tests {
         assert!(result.is_ok());
         let result = exp_sort_and_list_to_del(dir.path(), &SortType::CTime, rng.random_range(1..5)); //Can't modify ctime in tests so always one bucket
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_files_to_delete_are_correct() {
+        println!("Testing that files to delete are correct");
+
+        let dir = tempdir().unwrap();
+        let file1 = dir.path().join("oldest.txt");
+        let file2 = dir.path().join("youngest.txt");
+        let file3 = dir.path().join("second_youngest.txt");
+        let file4 = dir.path().join("third_youngest.txt");
+        fs::File::create(&file1).unwrap();
+        fs::File::create(&file2).unwrap();
+        fs::File::create(&file3).unwrap();
+        fs::File::create(&file4).unwrap();
+
+        let now = time::SystemTime::now();
+        set_file_times(
+            &file1,
+            FileTime::from_system_time(now - time::Duration::from_secs(10000)),
+            FileTime::from_system_time(now - time::Duration::from_secs(10000)),
+        )
+        .unwrap();
+        set_file_times(
+            &file2,
+            FileTime::from_system_time(now),
+            FileTime::from_system_time(now),
+        )
+        .unwrap();
+        set_file_times(
+            &file3,
+            FileTime::from_system_time(now - time::Duration::from_secs(1)),
+            FileTime::from_system_time(now - time::Duration::from_secs(1)),
+        )
+        .unwrap();
+        set_file_times(
+            &file4,
+            FileTime::from_system_time(now - time::Duration::from_secs(500)),
+            FileTime::from_system_time(now - time::Duration::from_secs(500)),
+        )
+        .unwrap();
+
+        let (to_keep, to_delete) =
+            exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 1).unwrap();
+
+        assert!(to_keep.contains(&file1));
+        assert!(to_delete.contains(&file3));
+        assert!(to_delete.contains(&file4));
+        assert!(to_delete.contains(&file2));
+        assert_eq!(to_keep.len(), 1);
+        assert_eq!(to_delete.len(), 3);
+
+        let (to_keep, to_delete) =
+            exp_sort_and_list_to_del(dir.path(), &SortType::ATime, 1).unwrap();
+        assert!(to_keep.contains(&file1));
+        assert!(to_delete.contains(&file3));
+        assert!(to_delete.contains(&file4));
+        assert!(to_delete.contains(&file2));
+        assert_eq!(to_keep.len(), 1);
+        assert_eq!(to_delete.len(), 3);
+
+        //Ctime is tested separately since it cannot be easily modified in tests
+    }
+
+    #[test]
+    fn test_ctime() {
+        println!("Testing ctime sorting");
+
+        let dir = tempdir().unwrap();
+        let file1 = dir.path().join("file1.txt");
+        fs::File::create(&file1).unwrap();
+
+        thread::sleep(time::Duration::from_secs(2)); // Ensure a difference in ctime
+
+        let file2 = dir.path().join("file2.txt");
+        fs::File::create(&file2).unwrap();
+
+        thread::sleep(time::Duration::from_secs(2));
+
+        let file3 = dir.path().join("file3.txt");
+        fs::File::create(&file3).unwrap();
+
+        let (to_keep, to_delete) =
+            exp_sort_and_list_to_del(dir.path(), &SortType::CTime, 1).unwrap();
+
+        assert!(to_keep.contains(&file1));
+        assert!(to_delete.contains(&file2));
+        assert!(to_delete.contains(&file3));
+        assert_eq!(to_keep.len(), 1);
+        assert_eq!(to_delete.len(), 2);
+    }
+
+    #[test]
+    fn test_buckets_behavior() {
+        println!("Testing buckets behavior explicitly");
+
+        let dir = tempdir().unwrap();
+        let now = time::SystemTime::now();
+
+        for i in 0..16 {
+            let file_path = dir.path().join(format!("file{}.txt", i));
+            fs::File::create(&file_path).unwrap();
+            let days = i * 86400;
+            set_file_times(
+                &file_path,
+                FileTime::from_system_time(now - time::Duration::from_secs(days)),
+                FileTime::from_system_time(now - time::Duration::from_secs(days)),
+            )
+            .unwrap();
+        }
+
+        let (to_keep, to_delete) =
+            exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 1).unwrap();
+
+        assert!(to_delete.contains(&dir.path().join("file0.txt"))); //Files asserted explicitly
+        assert!(to_keep.contains(&dir.path().join("file1.txt")));
+        assert!(to_keep.contains(&dir.path().join("file2.txt")));
+        assert!(to_delete.contains(&dir.path().join("file3.txt")));
+        assert!(to_keep.contains(&dir.path().join("file4.txt")));
+        assert!(to_delete.contains(&dir.path().join("file5.txt")));
+        assert!(to_delete.contains(&dir.path().join("file6.txt")));
+        assert!(to_delete.contains(&dir.path().join("file7.txt")));
+        assert!(to_keep.contains(&dir.path().join("file8.txt")));
+        assert!(to_delete.contains(&dir.path().join("file9.txt")));
+        assert!(to_delete.contains(&dir.path().join("file10.txt")));
+        assert!(to_delete.contains(&dir.path().join("file11.txt")));
+        assert!(to_delete.contains(&dir.path().join("file12.txt")));
+        assert!(to_delete.contains(&dir.path().join("file13.txt")));
+        assert!(to_delete.contains(&dir.path().join("file14.txt")));
+        assert!(to_keep.contains(&dir.path().join("file15.txt")));
+        assert_eq!(to_keep.len(), 5);
+        assert_eq!(to_delete.len(), 11);
+
+        let (to_keep, to_delete) =
+            exp_sort_and_list_to_del(dir.path(), &SortType::ATime, 1).unwrap();
+
+        assert!(to_delete.contains(&dir.path().join("file0.txt")));
+        assert!(to_keep.contains(&dir.path().join("file1.txt")));
+        assert!(to_keep.contains(&dir.path().join("file2.txt")));
+        assert!(to_delete.contains(&dir.path().join("file3.txt")));
+        assert!(to_keep.contains(&dir.path().join("file4.txt")));
+        assert!(to_delete.contains(&dir.path().join("file5.txt")));
+        assert!(to_delete.contains(&dir.path().join("file6.txt")));
+        assert!(to_delete.contains(&dir.path().join("file7.txt")));
+        assert!(to_keep.contains(&dir.path().join("file8.txt")));
+        assert!(to_delete.contains(&dir.path().join("file9.txt")));
+        assert!(to_delete.contains(&dir.path().join("file10.txt")));
+        assert!(to_delete.contains(&dir.path().join("file11.txt")));
+        assert!(to_delete.contains(&dir.path().join("file12.txt")));
+        assert!(to_delete.contains(&dir.path().join("file13.txt")));
+        assert!(to_delete.contains(&dir.path().join("file14.txt")));
+        assert!(to_keep.contains(&dir.path().join("file15.txt")));
+        assert_eq!(to_keep.len(), 5);
+        assert_eq!(to_delete.len(), 11);
+
+        // CTime is not tested here since it cannot be easily modified in tests
+    }
+
+    #[test]
+    fn test_identical_times() {
+        println!("Testing with files having identical modification times");
+
+        let dir = tempdir().unwrap();
+        let now = time::SystemTime::now();
+        let ft = FileTime::from_system_time(now);
+
+        let file1 = dir.path().join("file1.txt");
+        let file2 = dir.path().join("file2.txt");
+        let file3 = dir.path().join("file3.txt");
+        let file4 = dir.path().join("file4.txt");
+        fs::File::create(&file1).unwrap();
+        fs::File::create(&file2).unwrap();
+        fs::File::create(&file3).unwrap();
+        fs::File::create(&file4).unwrap();
+        set_file_times(&file1, ft, ft).unwrap();
+        set_file_times(&file2, ft, ft).unwrap();
+        set_file_times(&file3, ft, ft).unwrap();
+        set_file_times(&file4, ft, ft).unwrap();
+
+        let (to_keep, to_delete) =
+            exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 2).unwrap(); //Function deletes randomly. It is expected behavior for now. Maybe change in the future for asking the user.
+
+        assert_eq!(to_keep.len(), 2);
+        assert_eq!(to_delete.len(), 2);
+        assert_eq!(to_keep.len() + to_delete.len(), 4);
     }
 
     #[test]
@@ -307,15 +502,15 @@ mod tests {
     fn test_directory_with_subdirectories() {
         println!("Testing with a directory containing subdirectories");
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         for i in 0..5 {
             let file_path = dir.path().join(format!("file{}.txt", i));
-            std::fs::File::create(&file_path).unwrap();
+            fs::File::create(&file_path).unwrap();
         }
-        let subdir_path = dir.path().join("subdir");
-        std::fs::create_dir(&subdir_path).unwrap();
-        let subfile_path = subdir_path.join("subfile.txt");
-        std::fs::File::create(&subfile_path).unwrap();
+        let sub_dir_path = dir.path().join("sub_dir");
+        fs::create_dir(&sub_dir_path).unwrap();
+        let subfile_path = sub_dir_path.join("subfile.txt");
+        fs::File::create(&subfile_path).unwrap();
 
         let result = exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 1);
         assert!(result.is_ok());
