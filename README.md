@@ -8,8 +8,10 @@ The **ExpDel** is a tool for deleting files <ins>exponentially</ins> based on th
 It is designed to be used in a terminal environment and it was written in Rust.
 It is particularly useful for managing large directories with many files, where you want to keep a certain number of the oldest files in each time segment while deleting the rest.
 
+The program was tested **only on Linux**. It might work on other operating systems, but this is not guaranteed.
+
 # Important Note
-This is still a **work in progress**, and it is not yet ready for production use. For now, it just lists the files that would be deleted, but **does not actually delete them**. Deletion is always a dangerous operation, and it is important to ensure that the program works correctly before enabling deletion functionality.
+**You delete files at your own risk.** This tool does not move files to a recycle bin or trash; it permanently deletes them. Always ensure you have backups of important data before using this tool.
 
 # Installation
 To install ExpDel, you need to have Rust installed on your system. Then, you can clone the repository and build the project:
