@@ -1,11 +1,49 @@
 use chrono;
+use clap::Parser;
 use itertools::Itertools;
 use std::collections;
 use std::fs;
 use std::io;
 use std::path;
-use std::time;
 use std::process;
+use std::time;
+use walkdir::WalkDir;
+
+/// Simple tool for deleting files exponentially based on their times in a specified path
+#[derive(Parser, Debug)]
+#[command(version = "0.1.0", about, author = "Zonkil9", long_about = None)]
+struct Args {
+    /// Path to the directory
+    #[arg(short = 'p', long)]
+    path: String,
+
+    /// Sort by: mtime (modification time), ctime (creation time), atime (access time)
+    #[arg(short = 's', long, default_value = "ctime")]
+    sort: String,
+
+    /// Number of files to keep per time segment
+    #[arg(short = 'k', long)]
+    keep: u32,
+
+    /// FOR EXPERTS ONLY! Use with caution.
+    /// Automatically confirm deletion without prompting. Cannot be used with --print_only.
+    #[arg(short = 'f', long, default_value_t = false)]
+    force: bool,
+
+    ///This is a Print only mode, so-called "dry run". No files will be deleted.
+    ///Cannot be used with --force or --quiet.
+    #[arg(short = 'o', long, default_value_t = false)]
+    print_only: bool,
+
+    /// Recursive mode: also process files in subdirectories.
+    #[arg(short = 'r', long, default_value_t = false)]
+    recursive: bool,
+
+    /// Quiet mode: no output, except for errors. Silent deletion.
+    /// Cannot be used with --print_only.
+    #[arg(short = 'q', long, default_value_t = false)]
+    quiet: bool,
+}
 
 #[derive(Debug)]
 enum SortType {
@@ -14,13 +52,29 @@ enum SortType {
     ATime,
 }
 
+macro_rules! println_if_not_quiet {
+    ($quiet:expr, $($arg:tt)*) => {
+        if !$quiet {
+            println!($($arg)*);
+        }
+    };
+}
+
 fn main() {
-    println!("Please enter the path");
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .expect("Failed to read line");
-    let path = path::Path::new(input.trim());
+    let args = Args::parse();
+
+    if args.quiet && args.print_only {
+        eprintln!("Error: --quiet and --print_only cannot be used together.");
+        process::exit(1);
+    }
+
+    if args.print_only && args.force {
+        eprintln!("Error: --print_only and --force cannot be used together.");
+        process::exit(1);
+    }
+
+    let path = path::Path::new(&args.path);
+
     if !path.exists() {
         eprintln!("Error: The provided path does not exist.");
         process::exit(1);
@@ -30,68 +84,49 @@ fn main() {
         process::exit(1);
     }
 
-    println!("\nSorting with: mtime / ctime / atime");
-    let mut sort_type = String::new();
-    io::stdin()
-        .read_line(&mut sort_type)
-        .expect("Failed to read line");
-
-    let sort_type = match sort_type.trim() {
+    let sort_type = match args.sort.to_lowercase().as_str() {
         "mtime" => SortType::MTime,
         "ctime" => SortType::CTime,
         "atime" => SortType::ATime,
         _ => {
-            eprintln!("Invalid sort type. Defaulting to mtime.");
-            SortType::MTime
+            eprintln!("Invalid sort type. Defaulting to ctime.");
+            SortType::CTime
         }
     };
 
+    let (_to_keep, to_delete) =
+        exp_sort_and_list_to_del(args.quiet, &path, &sort_type, args.keep, args.recursive)
+            .unwrap_or_else(|err| {
+                eprintln!("Error: {}", err);
+                (Vec::new(), Vec::new())
+            });
 
-    println!("\nFiles grouped by exponentially increasing time segments:");
-    let groups = group_files_by_bucket(&path, &sort_type).unwrap_or_else(|err| {
-        eprintln!("Error: {}", err);
-        collections::BTreeMap::new()
-    });
-    for (bucket, files) in groups.iter() {
-        println!(
-            "\nYounger than {} days but older than {} days:",
-            bucket,
-            bucket / 2
-        );
-        for (file, time) in files {
-            let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-            println!("{} | {}", file.display(), datetime.format("%Y-%m-%d %H:%M:%S"));
+    if !args.force && !args.print_only && !args.quiet && !to_delete.is_empty() {
+        if _to_keep.is_empty() {
+            println!("WARNING! No files will be kept, you want ALL files to be deleted.");
+        }
+        println!("\nDo you want to proceed with deletion? There is no undo. (yes/no)");
+        let mut confirmation = String::new();
+        io::stdin()
+            .read_line(&mut confirmation)
+            .expect("Failed to read line");
+        if confirmation.trim().to_lowercase() != "yes" {
+            println!("Operation cancelled.");
+            return;
         }
     }
 
-    println!("\nPlease enter how many files to KEEP per group (0 to delete all files):");
-    let mut files_to_keep = String::new();
-    io::stdin()
-        .read_line(&mut files_to_keep)
-        .expect("Failed to read line");
-    let files_to_keep: u32 = files_to_keep.trim().parse().unwrap_or(0);
-
-    let (_to_keep, to_delete) = exp_sort_and_list_to_del(&path, &sort_type, files_to_keep).unwrap_or_else(|err| {
-        eprintln!("Error: {}", err);
-        (Vec::new(), Vec::new())
-    });
-
-    println!("\nDo you want to proceed with deletion? There is no undo. (yes/no)");
-    let mut confirmation = String::new();
-    io::stdin()
-        .read_line(&mut confirmation)
-        .expect("Failed to read line");
-    if confirmation.trim().to_lowercase() == "yes" {
+    if !args.print_only {
         if !to_delete.is_empty() {
-            delete_files(&to_delete).unwrap_or_else(|err| {
+            delete_files(args.quiet, &to_delete).unwrap_or_else(|err| {
                 eprintln!("Error during deletion: {}", err);
             });
         } else {
             println!("No files to delete.");
-    };
+        }
     } else {
-        println!("Operation cancelled.");
-    };
+        println!("\nPrint-only enabled, no files were deleted.");
+    }
 }
 
 fn get_time_type(meta: &fs::Metadata, sort_type: &SortType) -> time::SystemTime {
@@ -139,95 +174,176 @@ fn group_files_by_bucket(
     Ok(groups)
 }
 
+fn group_files_by_bucket_recursive(
+    root: &path::Path,
+    sort_type: &SortType,
+) -> io::Result<
+    collections::BTreeMap<
+        path::PathBuf,
+        collections::BTreeMap<u64, Vec<(path::PathBuf, time::SystemTime)>>,
+    >,
+> {
+    let mut all_groups = collections::BTreeMap::new();
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if entry.file_type().is_dir() {
+            let dir_path = entry.path();
+            let groups = group_files_by_bucket(dir_path, sort_type)?;
+            if !groups.is_empty() {
+                all_groups.insert(dir_path.to_path_buf(), groups);
+            } else {
+                println_if_not_quiet!(
+                    false,
+                    "Directory {} is empty. Skipping.",
+                    dir_path.display()
+                );
+            }
+        }
+    }
+
+    if all_groups.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No files found in the directory or its subdirectories. Remember that the program only works with files, not directories.",
+        ));
+    }
+
+    Ok(all_groups)
+}
+
 fn exp_sort_and_list_to_del(
+    quiet: bool,
     path: &path::Path,
     sort_type: &SortType,
     files_to_keep: u32,
+    recursive: bool,
 ) -> io::Result<(Vec<path::PathBuf>, Vec<path::PathBuf>)> {
-    println!(
-        "\nOpening {}, sorting by {:?} and keeping {} files",
-        path.display(),
-        sort_type,
-        files_to_keep
-    );
+    if recursive {
+        let all_groups = group_files_by_bucket_recursive(path, sort_type)?;
+        let mut to_keep = Vec::new();
+        let mut to_delete = Vec::new();
+        for (dir, groups) in all_groups {
+            println_if_not_quiet!(
+                quiet,
+                "\nOpening {}, sorting by {:?} and keeping {} files",
+                dir.display(),
+                sort_type,
+                files_to_keep
+            );
+            for (bucket, files) in groups.iter() {
+                println_if_not_quiet!(
+                    quiet,
+                    "\nYounger than {} days but older than {} days:",
+                    bucket,
+                    bucket / 2
+                );
+                let sorted: Vec<_> = files.iter().sorted_by_key(|(_, t)| *t).collect();
+                let split_idx = files_to_keep.min(sorted.len() as u32) as usize;
+                let (keep, delete) = sorted.split_at(split_idx);
 
-    let groups = group_files_by_bucket(path, sort_type)?;
-    let mut to_keep = Vec::new();
-    let mut to_delete = Vec::new();
+                if delete.is_empty() {
+                    println_if_not_quiet!(quiet, "No files to delete in this group.");
+                }
 
-    if files_to_keep == 0 && !cfg!(test) {
-        println!("No files will be kept, you want ALL files to be deleted.");
-        println!("Are you sure you want to proceed? (yes/no)");
-        let mut confirmation = String::new();
-        io::stdin()
-            .read_line(&mut confirmation)
-            .expect("Failed to read line");
-        if confirmation.trim().to_lowercase() != "yes" {
-            println!("Operation cancelled.");
-            return Ok((Vec::new(), Vec::new()));
+                for (file, time) in keep {
+                    let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+                    println_if_not_quiet!(
+                        quiet,
+                        "{} | {}",
+                        file.display(),
+                        datetime.format("%Y-%m-%d %H:%M:%S")
+                    );
+                    to_keep.push(file.clone());
+                }
+
+                for (file, time) in delete {
+                    let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+                    println_if_not_quiet!(
+                        quiet,
+                        "{} | {} <-- to be deleted",
+                        file.display(),
+                        datetime.format("%Y-%m-%d %H:%M:%S")
+                    );
+                    to_delete.push(file.clone());
+                }
+            }
         }
-    } else if files_to_keep == 0 && cfg!(test) {
-        println!("(Test mode) Skipping confirmation.");
-    }
-
-    for (bucket, files) in groups.iter() {
-        println!(
-            "\nYounger than {} days but older than {} days:",
-            bucket,
-            bucket / 2
+        Ok((to_keep, to_delete))
+    } else {
+        println_if_not_quiet!(
+            quiet,
+            "\nOpening {}, sorting by {:?} and keeping {} files",
+            path.display(),
+            sort_type,
+            files_to_keep
         );
-        let sorted: Vec<_> = files.iter().sorted_by_key(|(_, t)| *t).collect();
-        let split_idx = files_to_keep.min(sorted.len() as u32) as usize; // Ensure the code doesn't panic
-        let (keep, delete) = sorted.split_at(split_idx); // Split the sorted files into two groups
 
-        if delete.is_empty() {
-            println!("No files to delete in this group.");
+        let groups = group_files_by_bucket(path, sort_type)?;
+        let mut to_keep = Vec::new();
+        let mut to_delete = Vec::new();
+        for (bucket, files) in groups.iter() {
+            println_if_not_quiet!(
+                quiet,
+                "\nYounger than {} days but older than {} days:",
+                bucket,
+                bucket / 2
+            );
+            let sorted: Vec<_> = files.iter().sorted_by_key(|(_, t)| *t).collect();
+            let split_idx = files_to_keep.min(sorted.len() as u32) as usize; // Ensure the code doesn't panic
+            let (keep, delete) = sorted.split_at(split_idx); // Split the sorted files into two groups
+
+            if delete.is_empty() {
+                println_if_not_quiet!(quiet, "No files to delete in this group.");
+            }
+
+            for (file, time) in keep {
+                let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+                println_if_not_quiet!(
+                    quiet,
+                    "{} | {}",
+                    file.display(),
+                    datetime.format("%Y-%m-%d %H:%M:%S")
+                );
+                to_keep.push(file.clone());
+            }
+            for (file, time) in delete {
+                let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+                println_if_not_quiet!(
+                    quiet,
+                    "{} | {} <-- to be deleted",
+                    file.display(),
+                    datetime.format("%Y-%m-%d %H:%M:%S")
+                );
+                to_delete.push(file.clone());
+            }
         }
 
-        for (file, time) in keep {
-            let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-            println!(
-                "{} | {}",
-                file.display(),
-                datetime.format("%Y-%m-%d %H:%M:%S")
-            );
-            to_keep.push(file.clone());
-        }
-        for (file, time) in delete {
-            let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-            println!(
-                "{} | {} <-- to be deleted",
-                file.display(),
-                datetime.format("%Y-%m-%d %H:%M:%S")
-            );
-            to_delete.push(file.clone());
-        }
+        Ok((to_keep, to_delete))
     }
-
-    Ok((to_keep, to_delete))
 }
 
-fn delete_files(files: &[path::PathBuf]) -> io::Result<()> {
+fn delete_files(quiet: bool, files: &[path::PathBuf]) -> io::Result<()> {
+    println_if_not_quiet!(quiet, "\nDeleting files...");
     for file in files {
         match fs::remove_file(file) {
-            Ok(_) => println!("File deleted: {}", file.display()),
+            Ok(_) => println_if_not_quiet!(quiet, "File deleted: {}", file.display()),
             Err(e) => eprintln!("Error during deletion {}: {}", file.display(), e),
         }
     }
     Ok(())
 }
 
-
 // Unit tests
 #[cfg(test)]
 mod tests {
     use super::*;
     use filetime::{FileTime, set_file_times};
+    use gag::BufferRedirect;
     use rand::Rng;
+    use std::io::Read;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     use std::thread;
     use tempfile::tempdir;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_get_time_type() {
@@ -265,11 +381,29 @@ mod tests {
             set_file_times(&file_path, random_time, random_time).unwrap();
         } // Create some files with different times, max one-year-old
 
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::MTime, rng.random_range(1..5));
+        let result = exp_sort_and_list_to_del(
+            false,
+            dir.path(),
+            &SortType::MTime,
+            rng.random_range(1..5),
+            false,
+        );
         assert!(result.is_ok());
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::ATime, rng.random_range(1..5));
+        let result = exp_sort_and_list_to_del(
+            false,
+            dir.path(),
+            &SortType::ATime,
+            rng.random_range(1..5),
+            false,
+        );
         assert!(result.is_ok());
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::CTime, rng.random_range(1..5)); //Can't modify ctime in tests so always one bucket
+        let result = exp_sort_and_list_to_del(
+            false,
+            dir.path(),
+            &SortType::CTime,
+            rng.random_range(1..5),
+            false,
+        ); //Can't modify ctime in tests so always one bucket
         assert!(result.is_ok());
     }
 
@@ -314,7 +448,7 @@ mod tests {
         .unwrap();
 
         let (to_keep, to_delete) =
-            exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 1).unwrap();
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 1, false).unwrap();
 
         assert!(to_keep.contains(&file1));
         assert!(to_delete.contains(&file3));
@@ -324,7 +458,7 @@ mod tests {
         assert_eq!(to_delete.len(), 3);
 
         let (to_keep, to_delete) =
-            exp_sort_and_list_to_del(dir.path(), &SortType::ATime, 1).unwrap();
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::ATime, 1, false).unwrap();
         assert!(to_keep.contains(&file1));
         assert!(to_delete.contains(&file3));
         assert!(to_delete.contains(&file4));
@@ -354,7 +488,7 @@ mod tests {
         fs::File::create(&file3).unwrap();
 
         let (to_keep, to_delete) =
-            exp_sort_and_list_to_del(dir.path(), &SortType::CTime, 1).unwrap();
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::CTime, 1, false).unwrap();
 
         assert!(to_keep.contains(&file1));
         assert!(to_delete.contains(&file2));
@@ -383,7 +517,7 @@ mod tests {
         }
 
         let (to_keep, to_delete) =
-            exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 1).unwrap();
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 1, false).unwrap();
 
         assert!(to_delete.contains(&dir.path().join("file0.txt"))); //Files asserted explicitly
         assert!(to_keep.contains(&dir.path().join("file1.txt")));
@@ -405,7 +539,7 @@ mod tests {
         assert_eq!(to_delete.len(), 11);
 
         let (to_keep, to_delete) =
-            exp_sort_and_list_to_del(dir.path(), &SortType::ATime, 1).unwrap();
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::ATime, 1, false).unwrap();
 
         assert!(to_delete.contains(&dir.path().join("file0.txt")));
         assert!(to_keep.contains(&dir.path().join("file1.txt")));
@@ -451,7 +585,7 @@ mod tests {
         set_file_times(&file4, ft, ft).unwrap();
 
         let (to_keep, to_delete) =
-            exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 2).unwrap(); //Function deletes randomly. It is expected behavior for now. Maybe change in the future for asking the user.
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 2, false).unwrap(); //Function deletes randomly. It is expected behavior for now. Maybe change in the future for asking the user.
 
         assert_eq!(to_keep.len(), 2);
         assert_eq!(to_delete.len(), 2);
@@ -480,11 +614,11 @@ mod tests {
             set_file_times(&file_path, random_time, random_time).unwrap();
         }
 
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 0);
+        let result = exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 0, false);
         assert!(result.is_ok());
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::ATime, 0);
+        let result = exp_sort_and_list_to_del(false, dir.path(), &SortType::ATime, 0, false);
         assert!(result.is_ok());
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::CTime, 0);
+        let result = exp_sort_and_list_to_del(false, dir.path(), &SortType::CTime, 0, false);
         assert!(result.is_ok());
     }
 
@@ -493,7 +627,7 @@ mod tests {
         println!("Testing with an empty directory");
 
         let dir = tempdir().unwrap();
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 2);
+        let result = exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 2, false);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
@@ -504,7 +638,7 @@ mod tests {
         println!("Testing with an invalid path");
 
         let invalid_path = path::Path::new("/invalid/path");
-        let result = exp_sort_and_list_to_del(invalid_path, &SortType::MTime, 2);
+        let result = exp_sort_and_list_to_del(false, invalid_path, &SortType::MTime, 2, false);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
@@ -517,7 +651,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test_file.txt");
         fs::File::create(&file_path).unwrap();
-        let result = exp_sort_and_list_to_del(&file_path, &SortType::MTime, 2);
+        let result = exp_sort_and_list_to_del(false, &file_path, &SortType::MTime, 2, false);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
@@ -539,11 +673,11 @@ mod tests {
             set_file_times(&file_path, ft, ft).unwrap();
         }
 
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 1);
+        let result = exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 1, false);
         assert!(result.is_ok());
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::ATime, 1);
+        let result = exp_sort_and_list_to_del(false, dir.path(), &SortType::ATime, 1, false);
         assert!(result.is_ok());
-        let result = exp_sort_and_list_to_del(dir.path(), &SortType::CTime, 1);
+        let result = exp_sort_and_list_to_del(false, dir.path(), &SortType::CTime, 1, false);
         assert!(result.is_ok());
     }
 
@@ -558,7 +692,7 @@ mod tests {
         fs::File::create(&file2).unwrap();
 
         let files_to_delete = vec![file1.clone(), file2.clone()];
-        let result = delete_files(&files_to_delete);
+        let result = delete_files(false, &files_to_delete);
         assert!(result.is_ok());
         assert!(!file1.exists());
         assert!(!file2.exists());
@@ -577,7 +711,7 @@ mod tests {
         fs::set_permissions(dir.path(), perms).unwrap();
 
         let files_to_delete = vec![file1.clone()];
-        let result = delete_files(&files_to_delete);
+        let result = delete_files(false, &files_to_delete);
 
         assert!(result.is_ok());
         assert!(file1.exists());
@@ -585,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_directory_with_subdirectories() {
-        // Subdirectories should be ignored
+        // Subdirectories should be ignored in non-recursive mode
         println!("Testing with a directory containing subdirectory");
 
         let dir = tempdir().unwrap();
@@ -598,8 +732,9 @@ mod tests {
         let subfile_path = sub_dir_path.join("subfile.txt");
         fs::File::create(&subfile_path).unwrap();
 
-        let (_to_keep, to_delete) = exp_sort_and_list_to_del(dir.path(), &SortType::MTime, 0).unwrap();
-        delete_files(&to_delete).unwrap();
+        let (_to_keep, to_delete) =
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 0, false).unwrap();
+        delete_files(false, &to_delete).unwrap();
 
         assert!(dir.path().exists());
         for i in 0..5 {
@@ -608,5 +743,61 @@ mod tests {
         }
         assert!(sub_dir_path.exists());
         assert!(subfile_path.exists());
+    }
+
+    #[test]
+    fn test_directory_with_subdirectories_with_recursive_on() {
+        // Subdirectories should NOT be ignored in recursive mode
+        println!("Testing with a directory containing subdirectory with --recursive on");
+
+        let dir = tempdir().unwrap();
+        for i in 0..5 {
+            let file_path = dir.path().join(format!("file{}.txt", i));
+            fs::File::create(&file_path).unwrap();
+        }
+        let sub_dir_path = dir.path().join("sub_dir");
+        fs::create_dir(&sub_dir_path).unwrap();
+        let subfile_path = sub_dir_path.join("subfile.txt");
+        fs::File::create(&subfile_path).unwrap();
+
+        let (_to_keep, to_delete) =
+            exp_sort_and_list_to_del(false, dir.path(), &SortType::MTime, 0, true).unwrap();
+        delete_files(false, &to_delete).unwrap();
+
+        assert!(dir.path().exists());
+        for i in 0..5 {
+            let file_path = dir.path().join(format!("file{}.txt", i));
+            assert!(!file_path.exists());
+        }
+        assert!(sub_dir_path.exists());
+        assert!(!subfile_path.exists());
+    }
+
+    #[test]
+    fn test_quiet_mode() {
+        println!("Testing quiet mode");
+
+        let dir = tempdir().unwrap();
+        let file1 = dir.path().join("file1.txt");
+        let file2 = dir.path().join("file2.txt");
+        fs::File::create(&file1).unwrap();
+        fs::File::create(&file2).unwrap();
+
+        //Capture output
+        let mut buf = Vec::new();
+        let mut redirect = BufferRedirect::stdout().unwrap();
+
+        let files_to_delete = vec![file1.clone(), file2.clone()];
+        let result = delete_files(true, &files_to_delete);
+
+        redirect.read_to_end(&mut buf).unwrap();
+        assert!(
+            buf.is_empty(),
+            "Expected no output in quiet mode, but got some."
+        );
+
+        assert!(result.is_ok());
+        assert!(!file1.exists());
+        assert!(!file2.exists());
     }
 }
