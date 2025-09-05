@@ -39,7 +39,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ExpDel-windows
-        path: target/release/ExpDel
+        path: target/release/ExpDel.exe
 
   build_macos:
     runs-on: macos-latest
