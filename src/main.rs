@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 
 /// Simple tool for deleting files exponentially based on their times in a specified path
 #[derive(Parser, Debug)]
-#[command(version = "0.1.0", about, author = "Zonkil9", long_about = None)]
+#[command(version = "0.1.1", about, author = "Zonkil9", long_about = None)]
 struct Args {
     /// Path to the directory
     #[arg(short = 'p', long)]
@@ -222,102 +222,15 @@ fn exp_sort_and_list_to_del(
         let mut to_keep = Vec::new();
         let mut to_delete = Vec::new();
         for (dir, groups) in all_groups {
-            println_if_not_quiet!(
-                quiet,
-                "\nOpening {}, sorting by {:?} and keeping {} files",
-                dir.display(),
-                sort_type,
-                files_to_keep
-            );
-            for (bucket, files) in groups.iter() {
-                println_if_not_quiet!(
-                    quiet,
-                    "\nYounger than {} days but older than {} days:",
-                    bucket,
-                    bucket / 2
-                );
-                let sorted: Vec<_> = files.iter().sorted_by_key(|(_, t)| *t).collect();
-                let split_idx = files_to_keep.min(sorted.len() as u32) as usize;
-                let (keep, delete) = sorted.split_at(split_idx);
-
-                if delete.is_empty() {
-                    println_if_not_quiet!(quiet, "No files to delete in this group.");
-                }
-
-                for (file, time) in keep {
-                    let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-                    println_if_not_quiet!(
-                        quiet,
-                        "{} | {}",
-                        file.display(),
-                        datetime.format("%Y-%m-%d %H:%M:%S")
-                    );
-                    to_keep.push(file.clone());
-                }
-
-                for (file, time) in delete {
-                    let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-                    println_if_not_quiet!(
-                        quiet,
-                        "{} | {} <-- to be deleted",
-                        file.display(),
-                        datetime.format("%Y-%m-%d %H:%M:%S")
-                    );
-                    to_delete.push(file.clone());
-                }
-            }
+            let (keep, delete) =
+                process_groups(quiet, &groups, sort_type, files_to_keep, &dir);
+            to_keep.extend(keep);
+            to_delete.extend(delete);
         }
         Ok((to_keep, to_delete))
     } else {
-        println_if_not_quiet!(
-            quiet,
-            "\nOpening {}, sorting by {:?} and keeping {} files",
-            path.display(),
-            sort_type,
-            files_to_keep
-        );
-
         let groups = group_files_by_bucket(path, sort_type)?;
-        let mut to_keep = Vec::new();
-        let mut to_delete = Vec::new();
-        for (bucket, files) in groups.iter() {
-            println_if_not_quiet!(
-                quiet,
-                "\nYounger than {} days but older than {} days:",
-                bucket,
-                bucket / 2
-            );
-            let sorted: Vec<_> = files.iter().sorted_by_key(|(_, t)| *t).collect();
-            let split_idx = files_to_keep.min(sorted.len() as u32) as usize; // Ensure the code doesn't panic
-            let (keep, delete) = sorted.split_at(split_idx); // Split the sorted files into two groups
-
-            if delete.is_empty() {
-                println_if_not_quiet!(quiet, "No files to delete in this group.");
-            }
-
-            for (file, time) in keep {
-                let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-                println_if_not_quiet!(
-                    quiet,
-                    "{} | {}",
-                    file.display(),
-                    datetime.format("%Y-%m-%d %H:%M:%S")
-                );
-                to_keep.push(file.clone());
-            }
-            for (file, time) in delete {
-                let datetime: chrono::DateTime<chrono::Local> = (*time).into();
-                println_if_not_quiet!(
-                    quiet,
-                    "{} | {} <-- to be deleted",
-                    file.display(),
-                    datetime.format("%Y-%m-%d %H:%M:%S")
-                );
-                to_delete.push(file.clone());
-            }
-        }
-
-        Ok((to_keep, to_delete))
+        Ok(process_groups(quiet, &groups, sort_type, files_to_keep, path))
     }
 }
 
@@ -332,7 +245,60 @@ fn delete_files(quiet: bool, files: &[path::PathBuf]) -> io::Result<()> {
     Ok(())
 }
 
-// Unit tests
+fn process_groups(
+    quiet: bool,
+    groups: &collections::BTreeMap<u64, Vec<(path::PathBuf, time::SystemTime)>>,
+    sort_type: &SortType,
+    files_to_keep: u32,
+    dir: &path::Path,
+) -> (Vec<path::PathBuf>, Vec<path::PathBuf>) {
+    let mut to_keep = Vec::new();
+    let mut to_delete = Vec::new();
+    println_if_not_quiet!(
+        quiet,
+        "\nOpening {}, sorting by {:?} and keeping {} files",
+        dir.display(),
+        sort_type,
+        files_to_keep
+    );
+    for (bucket, files) in groups.iter() {
+        println_if_not_quiet!(
+            quiet,
+            "\nYounger than {} days but older than {} days:",
+            bucket,
+            bucket / 2
+        );
+        let sorted: Vec<_> = files.iter().sorted_by_key(|(_, t)| *t).collect();
+        let split_idx = files_to_keep.min(sorted.len() as u32) as usize;
+        let (keep, delete) = sorted.split_at(split_idx);
+        if delete.is_empty() {
+            println_if_not_quiet!(quiet, "No files to delete in this group.");
+        }
+        for (file, time) in keep {
+            let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+            println_if_not_quiet!(
+                quiet,
+                "{} | {}",
+                file.display(),
+                datetime.format("%Y-%m-%d %H:%M:%S")
+            );
+            to_keep.push(file.clone());
+        }
+        for (file, time) in delete {
+            let datetime: chrono::DateTime<chrono::Local> = (*time).into();
+            println_if_not_quiet!(
+                quiet,
+                "{} | {} <-- to be deleted",
+                file.display(),
+                datetime.format("%Y-%m-%d %H:%M:%S")
+            );
+            to_delete.push(file.clone());
+        }
+    }
+    (to_keep, to_delete)
+}
+
+    // Unit tests
 #[cfg(test)]
 mod tests {
     use super::*;
