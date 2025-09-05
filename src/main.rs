@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 
 /// Simple tool for deleting files exponentially based on their times in a specified path
 #[derive(Parser, Debug)]
-#[command(version = "0.1.1", about, author = "Zonkil9", long_about = None)]
+#[command(version = "0.1.2", about, author = "Zonkil9", long_about = None)]
 struct Args {
     /// Path to the directory
     #[arg(short = 'p', long)]
@@ -131,9 +131,9 @@ fn main() {
 
 fn get_time_type(meta: &fs::Metadata, sort_type: &SortType) -> time::SystemTime {
     match sort_type {
-        SortType::MTime => meta.modified().unwrap_or(time::UNIX_EPOCH),
-        SortType::ATime => meta.accessed().unwrap_or(time::UNIX_EPOCH),
-        SortType::CTime => meta.created().unwrap_or(time::UNIX_EPOCH),
+        SortType::MTime => meta.modified().unwrap_or_else(|_| time::UNIX_EPOCH),
+        SortType::ATime => meta.accessed().unwrap_or_else(|_| time::UNIX_EPOCH),
+        SortType::CTime => meta.created().unwrap_or_else(|_| time::UNIX_EPOCH),
     }
 }
 
@@ -301,13 +301,15 @@ fn process_groups(
     // Unit tests
 #[cfg(test)]
 mod tests {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use filetime::{FileTime, set_file_times};
     use gag::BufferRedirect;
     use rand::Rng;
     use std::io::Read;
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::thread;
     use tempfile::tempdir;
 
@@ -672,9 +674,19 @@ mod tests {
         let file1 = dir.path().join("file1.txt");
         fs::File::create(&file1).unwrap();
 
-        let mut perms = fs::metadata(dir.path()).unwrap().permissions();
-        perms.set_mode(0o555);
-        fs::set_permissions(dir.path(), perms).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(dir.path()).unwrap().permissions();
+            perms.set_mode(0o555);
+            fs::set_permissions(dir.path(), perms).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            // On Windows, changing permissions is more complex and may require additional crates.
+            // For simplicity, we will skip this part of the test on Windows.
+            println!("Permission denied test is not implemented on Windows");
+            return;
+        }
 
         let files_to_delete = vec![file1.clone()];
         let result = delete_files(false, &files_to_delete);
